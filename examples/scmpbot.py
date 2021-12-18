@@ -15,9 +15,11 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 """
 Signal Bot example, get reward by sending photo to IPFS or verify the photo.
 """
+
 import csv
 import io
 import json
@@ -34,8 +36,9 @@ import feedparser  # type: ignore
 import requests
 from bs4 import BeautifulSoup  # type: ignore
 
-from cai.jumbf import json_to_bytes
-from cai.starling import Starling
+from c2pa.jumbf import json_to_bytes
+from c2pa.jumbf import json_to_cbor_bytes
+from c2pa.starling import Starling
 from mobilecoin.client import Client
 from PIL import Image
 from semaphore import Bot, ChatContext
@@ -115,6 +118,7 @@ def ipfs_add(filepath, cid_version=1):
     ipfs_cid = json.loads(response.text)['Hash']
     return ipfs_cid
 
+
 def parse_proofmode_zip_to_json_dict(zipfilepath):
     with zipfile.ZipFile(zipfilepath) as myzip:
         for fname in myzip.namelist():
@@ -151,38 +155,55 @@ def parse_proofmode_zip_to_json_dict(zipfilepath):
             else:
                 continue
 
+
 def parse_proofmode_zip_to_json(zipfilepath):
     dict1 = parse_proofmode_zip_to_json_dict(zipfilepath)
     jsonData = json.dumps(dict1, indent=4)
     return jsonData
 
+
 def parse_proofmode_zip_to_photo(zipfilepath):
+    photoName = None
+    photoBytes = None
     with zipfile.ZipFile(zipfilepath) as myzip:
         for fname in myzip.namelist():
             # pick *.jpg
             if fname.endswith(".jpg"):
+                photoName = fname
                 with myzip.open(fname, mode="r") as f:
-                    return f.read()
+                    photoBytes = f.read()
+                return {
+                    'photoName': photoName,
+                    'photoBytes': photoBytes
+                }
             else:
                 continue
 
+
 def replace_photo_in_zip(zipfilepath, photofilepath):
-    fname, fext = os.path.splitext(zipfilepath)
-    fpath = fname + '-cai-cai-cai' + fext
-    shutil.copyfile(zipfilepath, fpath)
-    z = zipfile.ZipFile(fpath, "w")
-    with zipfile.ZipFile(zipfilepath) as myzip:
-        for fname in myzip.namelist():
+    c2paZipPath = os.path.join('/tmp', os.path.basename(zipfilepath))
+    shutil.copyfile(zipfilepath, c2paZipPath)
+
+    # copy original zip and exclude *.jpg
+    z = zipfile.ZipFile(c2paZipPath, 'w')
+    with zipfile.ZipFile(zipfilepath) as srcZip:
+        for fname in srcZip.namelist():
             # skip *.jpg
             if not fname.endswith(".jpg"):
-                with myzip.open(fname, mode="r") as f:
+                with srcZip.open(fname, mode="r") as f:
                     data = f.read()
                     z.writestr(fname, data)
     z.close()
-    z = zipfile.ZipFile(fpath, "a")
-    z.write(photofilepath)
+
+    # add the c2pa-injected jpg
+    z = zipfile.ZipFile(c2paZipPath, 'a')
+    z.write(photofilepath, os.path.basename(photofilepath))
     z.close()
-    return fpath
+
+    print(f'Soruce Zip: {zipfilepath}')
+    print(f'C2PA Zip: {c2paZipPath}')
+    return c2paZipPath
+
 
 def resize_image(image_bytes, scale=0.3):
     '''Resize image bytes by the given scale.
@@ -204,67 +225,72 @@ def resize_image(image_bytes, scale=0.3):
     return bytes_io.getvalue()
 
 
-def cai_injection(photo_bytes,
-                  photo_filename,
-                  thumbnail_bytes,
-                  proofmode_json,
-                  metadata=None,
-                  right_owner=''):
-    metadata = {
-        'claim': {
-            'store_label': 'cb.NumbersProtocol_1',
-            'recorder': 'ProofMode',
+def c2pa_injection(photo_bytes,
+                   photo_filename,
+                   thumbnail_bytes,
+                   proofmode_json,
+                   right_owner=''):
+    assertions = {
+        'c2pa.thumbnail.claim.jpeg': {
+            'type': '.jpg',
+            'data_bytes': photo_bytes
         },
-        'assertions': {
-            'adobe.asset.info': {
-                'type': '.json',
-                'data_bytes': json_to_bytes({
-                    'title': photo_filename
-                })
-            },
-            'cai.location.broad': {
-                'type': '.json',
-                'data_bytes': json_to_bytes({
-                    'location': proofmode_json["proofmode:IPv6"]
-                })
-            },
-            'cai.rights': {
-                'type': '.json',
-                'data_bytes': json_to_bytes({
-                    'copyright': right_owner
-                })
-            },
-            'cai.claim.thumbnail.jpg.jpg': {
-                'type': '.jpg',
-                'data_bytes': thumbnail_bytes
-            },
-            'cai.acquisition.thumbnail.jpg.jpg': {
-                'type': '.jpg',
-                'data_bytes': thumbnail_bytes
-            },
-            'starling.integrity.json': {
-                'type': '.json',
-                'data_bytes': json_to_bytes(proofmode_json)
-            }
-        }
+        'c2pa.actions': {
+            'type': '.cbor',
+            'data_bytes': json_to_cbor_bytes({
+                "actions": [
+                    {
+                        "action": "c2pa.edited",
+                        "parameters": "gradient"
+                    }
+                ]
+            })
+        },
+        'adobe.dictionary': {
+            'type': '.cbor',
+            'data_bytes': json_to_cbor_bytes({
+                "url": "https://cai-assertions.adobe.com/photoshop/dictionary.json"
+            })
+        },
+        'adobe.beta': {
+            'type': '.cbor',
+            'data_bytes': json_to_cbor_bytes({
+                'version': '0.7.0'
+            })
+        },
+        'stds.schema-org.CreativeWork': {
+            'type': '.json',
+            'data_bytes': json_to_bytes({
+                "@context": "https://schema.org",
+                "@type": "CreativeWork",
+                "author": [
+                    {
+                        "@type": "Person",
+                        "credential": [],
+                        "name": right_owner
+                    }
+                ]
+            })
+        },
     }
+
+    key = open('/home/bafu/codes/semaphore/examples/key.pem', 'rb').read()
+    cert = open('/home/bafu/codes/semaphore/examples/cert.pem', 'rb').read()
 
     starling = Starling(photo_bytes,
                         photo_filename,
-                        metadata['assertions'],
-                        metadata['claim']['store_label'],
-                        metadata['claim']['recorder'],
-                        '',
-                        '')
-    photo_bytes = starling.cai_injection()
+                        assertions,
+                        'numbersprotocol',
+                        'Signal Bot by Numbers Protocol',
+                        key,
+                        cert)
+    photo_bytes = starling.c2pa_injection()
 
     # Save to file
-    fname, fext = os.path.splitext('/tmp/cai-debug.jpg')
-    fpath = fname + '-cai-cai-cai' + fext
+    fpath = os.path.join('/tmp', photo_filename)
     with open(fpath, 'wb') as f:
         f.write(photo_bytes)
-    print('CAI file:', fpath)
-
+        print('C2PA file:', fpath)
     return fpath
 
 
@@ -299,17 +325,21 @@ async def ipfs(ctx: ChatContext) -> None:
                 proofmode_json = parse_proofmode_zip_to_json_dict(attachment.stored_filename)
                 print('ProofMode JSON', json.dumps(proofmode_json, indent=4))
 
+                # FIXME: attachment is zip not image, Latest_photo is not a proper name
                 Latest_photo = attachment.stored_filename
 
                 # CAI injection
-                photo_bytes = parse_proofmode_zip_to_photo(attachment.stored_filename)
-                Latest_photo = cai_injection(photo_bytes,
-                                             Latest_photo,
-                                             resize_image(photo_bytes),
-                                             proofmode_json,
-                                             metadata=None,
-                                             right_owner=ctx.message.source.number)
-                Latest_photo = replace_photo_in_zip(attachment.stored_filename, Latest_photo)
+                r = parse_proofmode_zip_to_photo(attachment.stored_filename)
+                photo_name = r['photoName']
+                photo_bytes = r['photoBytes']
+                Latest_photo = c2pa_injection(photo_bytes,
+                                              #Latest_photo,
+                                              photo_name,
+                                              resize_image(photo_bytes),
+                                              proofmode_json,
+                                              right_owner=ctx.message.source.number)
+                proofmode_zip = replace_photo_in_zip(attachment.stored_filename, Latest_photo)
+                print(f'ProofMode zip: {proofmode_zip}')
             else:
                 print('Unknown type', attachment.content_type)
                 return
