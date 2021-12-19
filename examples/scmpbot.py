@@ -119,6 +119,49 @@ def ipfs_add(filepath, cid_version=1):
     return ipfs_cid
 
 
+def starling_integrity_create_signal(filepath):
+    '''Push indicated file to the Starling integrity create-signal API
+
+    Note: access token in the file should NOT contain the "Bearer" prefix.
+    '''
+    try:
+        access_token = open('/home/bafu/codes/semaphore/examples/token.txt', 'r').read().strip()
+    except Exception as e:
+        print('Integrity API ERROR: Fail to read API token')
+        print(f'{e}')
+
+    url = 'https://integrity-api.starlinglab.org/v1/assets/create-proofmode'
+    payload = {}
+
+    try:
+        # WARNING: guess_type relies on file extension instead of
+        #          checking content bytes.
+        mimetypes.init()
+        mimetype = mimetypes.guess_type(filepath)[0]
+
+        files = [
+          ('file', (os.path.basename(filepath), open(filepath, 'rb'), mimetype))
+        ]
+        print(f'Integrity API DEBUG: file mimetype: {mimetype}')
+    except Exception as e:
+        print(f'Integrity API ERROR: Fail to read file {filepath}')
+        print(f'{e}')
+
+    headers = {
+        'Authorization': f'Bearer {access_token}'
+    }
+    try:
+        response = requests.request(
+            'POST', url, headers=headers, data=payload, files=files
+        )
+        print(f'Integrity API DEBUG: {response.text}')
+    except Exception as e:
+        print(f'Integrity API ERROR: {response.text}')
+        print(f'{e}')
+    finally:
+        return response
+
+
 def parse_proofmode_zip_to_json_dict(zipfilepath):
     with zipfile.ZipFile(zipfilepath) as myzip:
         for fname in myzip.namelist():
@@ -181,7 +224,10 @@ def parse_proofmode_zip_to_photo(zipfilepath):
 
 
 def replace_photo_in_zip(zipfilepath, photofilepath):
-    c2paZipPath = os.path.join('/tmp', os.path.basename(zipfilepath))
+    if os.path.splitext(zipfilepath)[1] != '.zip':
+        c2paZipPath = os.path.join('/tmp', os.path.basename(zipfilepath) + '.zip')
+    else:
+        c2paZipPath = os.path.join('/tmp', os.path.basename(zipfilepath))
     shutil.copyfile(zipfilepath, c2paZipPath)
 
     # copy original zip and exclude *.jpg
@@ -340,6 +386,8 @@ async def ipfs(ctx: ChatContext) -> None:
                                               right_owner=ctx.message.source.number)
                 proofmode_zip = replace_photo_in_zip(attachment.stored_filename, Latest_photo)
                 print(f'ProofMode zip: {proofmode_zip}')
+
+                integrity_response = starling_integrity_create_signal(proofmode_zip)
             else:
                 print('Unknown type', attachment.content_type)
                 return
